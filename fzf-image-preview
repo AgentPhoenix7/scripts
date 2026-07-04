@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+file="$1"
+
+cols="${FZF_PREVIEW_COLUMNS:-80}"
+lines="${FZF_PREVIEW_LINES:-40}"
+
+# Leave room for fzf borders
+(( cols > 4 )) && cols=$((cols - 2))
+(( lines > 4 )) && lines=$((lines - 2))
+
+exec chafa \
+    --format symbols \
+    --symbols vhalf \
+    --animate=off \
+    --size="${cols}x${lines}" \
+    "$file" 2>/dev/null

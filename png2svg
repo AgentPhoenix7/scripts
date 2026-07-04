@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────
+# Colors
+# ──────────────────────────────────────────────────────────────
+
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+MAGENTA='\033[1;35m'
+CYAN='\033[1;36m'
+WHITE='\033[1;37m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+SEARCH_DIR="$HOME/.local/share/icons/hicolor"
+OUTPUT_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+PREVIEWER="$HOME/.local/bin/fzf-image-preview"
+
+banner() {
+    printf "\n"
+    printf "${MAGENTA}${BOLD}"
+    printf "╔══════════════════════════════════════╗\n"
+    printf "║      🖼️  PNG → SVG Converter         ║\n"
+    printf "╚══════════════════════════════════════╝\n"
+    printf "${RESET}\n"
+}
+
+cleanup() {
+    tput reset >/dev/null 2>&1 || clear
+}
+
+trap cleanup EXIT
+
+# ──────────────────────────────────────────────────────────────
+# Dependency Check
+# ──────────────────────────────────────────────────────────────
+
+for cmd in fzf find awk sort basename mkdir vtracer chafa; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        printf "${RED}❌ Missing dependency:${RESET} ${YELLOW}%s${RESET}\n" "$cmd"
+        exit 1
+    }
+done
+
+mkdir -p "$OUTPUT_DIR"
+
+banner
+printf "${CYAN}🔍 Searching for PNG icons...${RESET}\n"
+
+# ──────────────────────────────────────────────────────────────
+# Select Highest Resolution PNG Per Icon
+# ──────────────────────────────────────────────────────────────
+
+png_file=$(
+    find "$SEARCH_DIR" \
+        -type f \
+        -iname "*.png" \
+    | awk '
+    {
+        path = $0
+        size = 0
+
+        if (match(path, /\/[0-9]+x[0-9]+\//)) {
+            dims = substr(path, RSTART + 1, RLENGTH - 2)
+            split(dims, parts, "x")
+            size = parts[1]
+        }
+
+        name = path
+        sub(/^.*\//, "", name)
+
+        if (!(name in best) || size > best_size[name]) {
+            best[name] = path
+            best_size[name] = size
+        }
+    }
+
+    END {
+        for (name in best)
+            print best[name]
+    }' \
+    | sort \
+    | while read -r file; do
+        printf "%s\t%s\n" "$(basename "$file")" "$file"
+    done \
+    | fzf \
+        --height=95% \
+        --layout=reverse \
+        --border \
+        --cycle \
+        --info=inline \
+        --prompt="PNG > " \
+        --delimiter=$'\t' \
+        --with-nth=1 \
+        --preview-window="right:60%,border-left" \
+        --preview-label=" Preview " \
+        --preview "$PREVIEWER {2}" \
+        --bind 'ctrl-c:abort,esc:abort,q:abort' \
+    | cut -f2
+)
+
+# Force terminal cleanup after fzf exits
+tput reset >/dev/null 2>&1 || clear
+
+[[ -z "${png_file:-}" ]] && {
+    printf "${YELLOW}🚪 Cancelled.${RESET}\n"
+    exit 0
+}
+
+banner
+
+base_name="$(basename "${png_file%.*}")"
+svg_file="$OUTPUT_DIR/${base_name}.svg"
+
+printf "${BLUE}🖼️  Icon${RESET}   : ${WHITE}%s${RESET}\n" "$(basename "$png_file")"
+printf "${BLUE}📂 Source${RESET} : ${WHITE}%s${RESET}\n" "$png_file"
+printf "${MAGENTA}📁 Output${RESET} : ${WHITE}%s${RESET}\n" "$svg_file"
+
+printf "\n"
+printf "${CYAN}⚡ Converting PNG → SVG...${RESET}\n\n"
+
+vtracer \
+    --input "$png_file" \
+    --output "$svg_file" \
+    --mode spline \
+    --filter_speckle 4 \
+    --color_precision 8 \
+    --path_precision 2 \
+    --corner_threshold 60 \
+    --segment_length 4
+
+printf "\n"
+printf "${GREEN}🎉 SVG created successfully!${RESET}\n"
+printf "${GREEN}📄 File:${RESET} %s\n" "$svg_file"
+
+if gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1; then
+    printf "${CYAN}🔄 Icon cache refreshed.${RESET}\n"
+fi
+
+printf "\n"
