@@ -9,35 +9,130 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# Select output directory via GUI picker
-OUTPUT_DIR=$(kdialog --getexistingdirectory "$HOME" --title "📁 Select Download Folder")
-[ -z "$OUTPUT_DIR" ] && exit 0
+# --------------------------------------------------
+# Dependency checks
+# --------------------------------------------------
 
-# Accept URL as argument or prompt in terminal
-if [ $# -ge 1 ]; then
-    URL="$1"
-else
-    echo -e "${CYAN}${BOLD}🎬 yt-download${RESET}"
-    read -rp "$(echo -e "${YELLOW}🔗 Enter YouTube URL: ${RESET}")" URL
-fi
-[ -z "$URL" ] && exit 0
+for cmd in yad jq yt-dlp ffmpeg; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        printf "${RED}❌ Missing dependency: %s${RESET}\n" "$cmd" >&2
+        exit 1
+    fi
+done
 
-echo -e "\n${CYAN}📥 Starting download...${RESET}"
-echo -e "${YELLOW}📂 Output folder: ${BOLD}$OUTPUT_DIR${RESET}\n"
-
-# Pick Chrome profile for cookies
-CHROME_LOCAL_STATE="$HOME/.config/google-chrome/Local State"
-declare -a MENU_ARGS
-while IFS=$'\t' read -r key name; do
-    MENU_ARGS+=("$key" "$name")
-done < <(jq -r '.profile.info_cache | to_entries[] | "\(.key)\t\(.value.name)"' "$CHROME_LOCAL_STATE")
-PROFILE_KEY=$(kdialog --title "Chrome Profile" --menu "Select Chrome profile for cookies:" "${MENU_ARGS[@]}")
+# --------------------------------------------------
+# Temporary files and cleanup
+# --------------------------------------------------
 
 TMPFILE=$(mktemp)
 
+cleanup() {
+    rm -f -- "$TMPFILE"
+}
+
+trap cleanup EXIT
+
+# --------------------------------------------------
+# Select download directory using YAD
+# --------------------------------------------------
+
+OUTPUT_DIR=$(
+    yad --file \
+        --directory \
+        --title="📁 Select Download Folder" \
+        --filename="$HOME/" \
+        --width=850 \
+        --height=600 \
+        --center
+) || exit 0
+
+[[ -n "$OUTPUT_DIR" ]] || exit 0
+
+# --------------------------------------------------
+# Get YouTube URL
+# --------------------------------------------------
+
+if [[ $# -ge 1 ]]; then
+    URL="$1"
+else
+    printf "${CYAN}${BOLD}🎬 yt-download${RESET}\n"
+
+    read -rp "$(printf "${YELLOW}🔗 Enter YouTube URL: ${RESET}")" URL
+fi
+
+[[ -n "$URL" ]] || exit 0
+
+printf "\n${CYAN}📥 Starting download...${RESET}\n"
+printf "${YELLOW}📂 Output folder: ${BOLD}%s${RESET}\n\n" "$OUTPUT_DIR"
+
+# --------------------------------------------------
+# Detect Chrome profiles
+# --------------------------------------------------
+
+CHROME_LOCAL_STATE="$HOME/.config/google-chrome/Local State"
+
+COOKIE_ARGS=()
+
+if [[ -f "$CHROME_LOCAL_STATE" ]]; then
+
+    MENU_ARGS=()
+
+    while IFS=$'\t' read -r key name; do
+        [[ -n "$key" ]] || continue
+
+        MENU_ARGS+=("$key" "$name")
+
+    done < <(
+        jq -r '
+            .profile.info_cache // {}
+            | to_entries[]
+            | [.key, .value.name // .key]
+            | @tsv
+        ' "$CHROME_LOCAL_STATE"
+    )
+
+    if [[ ${#MENU_ARGS[@]} -gt 0 ]]; then
+
+        PROFILE_KEY=$(
+            yad --list \
+                --title="🌐 Chrome Profile" \
+                --text="Select Chrome profile for cookies:" \
+                --column="Profile Key:HD" \
+                --column="Profile Name" \
+                --print-column=1 \
+                --separator="" \
+                --width=550 \
+                --height=350 \
+                --center \
+                "${MENU_ARGS[@]}"
+        ) || exit 0
+
+        [[ -n "$PROFILE_KEY" ]] || exit 0
+
+        COOKIE_ARGS=(
+            --cookies-from-browser "chrome:$PROFILE_KEY"
+        )
+
+        printf "${GREEN}🍪 Chrome profile: %s${RESET}\n" "$PROFILE_KEY"
+
+    fi
+
+else
+    printf "${YELLOW}⚠ Chrome profiles not found. Continuing without cookies.${RESET}\n"
+fi
+
+# --------------------------------------------------
+# Download using yt-dlp
+# --------------------------------------------------
+
+printf "\n${CYAN}${BOLD}⬇ Downloading...${RESET}\n\n"
+
+STATUS=0
+
 yt-dlp \
+    --newline \
     --print-to-file after_move:filepath "$TMPFILE" \
-    --cookies-from-browser "chrome:$PROFILE_KEY" \
+    "${COOKIE_ARGS[@]}" \
     --write-subs \
     --write-auto-subs \
     --embed-subs \
@@ -48,31 +143,82 @@ yt-dlp \
     --merge-output-format mkv \
     -f "bv*+ba/b" \
     -o "$OUTPUT_DIR/%(title)s.%(ext)s" \
-    "$URL"
+    "$URL" || STATUS=$?
 
-STATUS=$?
-FINAL_FILE=$(tail -n1 "$TMPFILE")
-rm -f "$TMPFILE"
+# --------------------------------------------------
+# Verify downloaded files
+# --------------------------------------------------
 
-if [ "$STATUS" -eq 0 ] && [ -f "$FINAL_FILE" ]; then
+if [[ "$STATUS" -ne 0 ]]; then
+    printf "\n${RED}${BOLD}❌ Download failed (exit code %s).${RESET}\n" "$STATUS" >&2
+    exit "$STATUS"
+fi
 
-    BASE="${FINAL_FILE%.mkv}"
-
-    rm -f \
-        "${BASE}.vtt" \
-        "${BASE}".*.vtt \
-        "${BASE}.srt" \
-        "${BASE}".*.srt \
-        "${BASE}.ass" \
-        "${BASE}".*.ass \
-        "${BASE}.webp" \
-        "${BASE}.jpg" \
-        "${BASE}.jpeg" \
-        "${BASE}.png"
-
-    echo -e "\n${GREEN}${BOLD}✅ Download complete!${RESET}"
-    echo -e "${GREEN}🎞️  Saved to: ${BOLD}$FINAL_FILE${RESET}"
-else
-    echo -e "\n${RED}${BOLD}❌ Download failed.${RESET}" >&2
+if [[ ! -s "$TMPFILE" ]]; then
+    printf "\n${RED}${BOLD}❌ No downloaded files were recorded.${RESET}\n" >&2
     exit 1
+fi
+
+# --------------------------------------------------
+# Remove leftover subtitle/thumbnail files
+# --------------------------------------------------
+
+SUCCESS_COUNT=0
+
+while IFS= read -r FINAL_FILE || [[ -n "$FINAL_FILE" ]]; do
+
+    [[ -n "$FINAL_FILE" ]] || continue
+
+    if [[ ! -f "$FINAL_FILE" ]]; then
+        printf "${YELLOW}⚠ File not found: %s${RESET}\n" "$FINAL_FILE"
+        continue
+    fi
+
+    # Remove extension from actual output filename.
+    BASE="${FINAL_FILE%.*}"
+
+    # Remove only matching leftover sidecar files.
+    # Avoid deleting unrelated files.
+    for ext in vtt srt ass webp jpg jpeg png; do
+
+        for candidate in \
+            "${BASE}.${ext}" \
+            "${BASE}".*."${ext}"; do
+
+            [[ -f "$candidate" ]] || continue
+
+            rm -f -- "$candidate"
+
+        done
+
+    done
+
+    ((SUCCESS_COUNT += 1))
+
+    printf "\n${GREEN}🎞️ Saved to: ${BOLD}%s${RESET}\n" "$FINAL_FILE"
+
+done < "$TMPFILE"
+
+# --------------------------------------------------
+# Final status
+# --------------------------------------------------
+
+if [[ "$SUCCESS_COUNT" -gt 0 ]]; then
+
+    printf "\n${GREEN}${BOLD}✅ Download complete!${RESET}\n"
+    printf "${GREEN}📦 Total files: %s${RESET}\n" "$SUCCESS_COUNT"
+    printf "${GREEN}📂 Directory: %s${RESET}\n" "$OUTPUT_DIR"
+
+    yad --info \
+        --title="Download Complete" \
+        --text="✅ Download complete!\n\nFiles: $SUCCESS_COUNT\nFolder: $OUTPUT_DIR" \
+        --width=420 \
+        --center \
+        --button="OK:0" || true
+
+else
+
+    printf "\n${RED}${BOLD}❌ No valid downloaded files found.${RESET}\n" >&2
+    exit 1
+
 fi

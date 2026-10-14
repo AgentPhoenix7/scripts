@@ -21,7 +21,7 @@ gs \
   -dBATCH \
   -dNOPAUSE \
   -sDEVICE=png16m \
-  -r300 \
+  -r600 \
   -sOutputFile="${OUTPUT_DIR}/${PDF_NAME}-%03d.png" \
   "$INPUT"
 

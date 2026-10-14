@@ -17,7 +17,7 @@ REPO="ryanoasis/nerd-fonts"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 
 # Get the latest release tag from GitHub API
-LATEST_RELEASE=$(curl -s "$API_URL" | grep -Po '"tag_name": "\K.*?(?=")')
+LATEST_RELEASE=$(wget -qO- "$API_URL" | grep -Po '"tag_name": "\K.*?(?=")')
 
 # Check if the latest release is already downloaded
 if [ -f "$LATEST_RELEASE_FILE" ]; then
@@ -57,15 +57,20 @@ if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
   
   # Download each font zip file
   for FILE in "${FONT_FILES[@]}"; do
+    FONT_NAME="${FILE%.zip}"
+    FONT_DIR="$DOWNLOAD_DIR/$FONT_NAME"
     URL="https://github.com/$REPO/releases/download/$LATEST_RELEASE/$FILE"
     ZIP_PATH="$DOWNLOAD_DIR/$FILE"
     
+    # Create a directory for the font
+    mkdir -p "$FONT_DIR"
+    
     # Download the font zip file
     echo "Downloading $FILE..."
-    if curl -L -o "$ZIP_PATH" "$URL"; then
-      # Unzip the font into the nerdfonts directory
-      echo "Extracting $FILE..."
-      unzip -o "$ZIP_PATH" -d "$DOWNLOAD_DIR"
+    if wget -q -O "$ZIP_PATH" "$URL"; then
+      # Unzip the font into its directory
+      echo "Extracting $FILE into $FONT_DIR..."
+      unzip -o "$ZIP_PATH" -d "$FONT_DIR"
       
       # Remove the zip file after extraction
       rm "$ZIP_PATH"
@@ -83,4 +88,4 @@ if [ "$LATEST_RELEASE" != "$CURRENT_RELEASE" ]; then
   fc-cache -fv
 else
   echo "No new release found."
-fi 
+fi
